@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+import os
+import csv
+import argparse
+from PIL import Image
+from PIL.ExifTags import TAGS, GPSTAGS
+
+def get_exif(img):
+    try:
+        exif_raw = img._getexif() or {}
+        return {TAGS.get(k, k): v for k, v in exif_raw.items()}
+    except Exception:
+        return {}
+
+def get_gps_info(exif):
+    gps = {}
+    if not exif:
+        return None
+    gps_raw = exif.get('GPSInfo')
+    if not gps_raw:
+        return None
+    for key, val in gps_raw.items():
+        name = GPSTAGS.get(key, key)
+        gps[name] = val
+    return gps
+
+def _rational_to_float(r):
+    
+    try:
+        if isinstance(r, tuple):
+            num, den = r
+            return float(num) / float(den) if den else 0.0
+        return float(r)
+    except Exception:
+        return None
+
+def dms_to_decimal(dms):
+    
+    try:
+        deg = _rational_to_float(dms[0])
+        minu = _rational_to_float(dms[1])
+        sec = _rational_to_float(dms[2])
+        return deg + (minu / 60.0) + (sec / 3600.0)
+    except Exception:
+        return None
+
+def gps_to_decimal(gps):
+    lat = lon = alt = None
+    lat_v = gps.get('GPSLatitude')
+    lat_ref = gps.get('GPSLatitudeRef')
+    lon_v = gps.get('GPSLongitude')
+    lon_ref = gps.get('GPSLongitudeRef')
+    alt_v = gps.get('GPSAltitude')
+
+    if lat_v and lat_ref and lon_v and lon_ref:
+        lat = dms_to_decimal(lat_v)
+        lon = dms_to_decimal(lon_v)
+        if lat is not None and lat_ref in ['S', 's']:
+            lat = -lat
+        if lon is not None and lon_ref in ['W', 'w']:
+            lon = -lon
+
+    if alt_v is not None:
+        try:
+            alt = _rational_to_float(alt_v)
+        except:
+            alt = None
+
+    return lat, lon, alt
+
+def process_image(path):
+    try:
+        img = Image.open(path)
+    except Exception as e:
+        print(f"Cannot open {path}: {e}")
+        return None
+    exif = get_exif(img)
+    gps = get_gps_info(exif)
+    if not gps:
+        return None
+    lat, lon, alt = gps_to_decimal(gps)
+    dt = exif.get('DateTimeOriginal') or exif.get('DateTime')
+    return {'file': os.path.basename(path), 'lat': lat, 'lon': lon, 'altitude': alt, 'datetime': dt}
+
+def find_images(folder, exts={'.jpg', '.jpeg', '.tif', '.tiff'}):
+    for root, _, files in os.walk(folder):
+        for f in files:
+            if os.path.splitext(f.lower())[1] in exts:
+                yield os.path.join(root, f)
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--images', '-i', required=True, help='Folder containing images')
+    parser.add_argument('--output', '-o', default='geotags.csv', help='Output CSV filename')
+    args = parser.parse_args()
+
+    rows = []
+    for imgpath in find_images(args.images):
+        res = process_image(imgpath)
+        if res:
+            rows.append(res)
+            print(f"GPS found: {res['file']} -> {res['lat']}, {res['lon']}")
+        else:
+            print(f"No GPS: {os.path.basename(imgpath)}")
+
+    if not rows:
+        print("No geotags found in any image. Exiting without CSV.")
+        return
+
+    with open(args.output, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=['file', 'lat', 'lon', 'altitude', 'datetime'])
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+
+    print(f"Done. Wrote {len(rows)} rows to {args.output}")
+
+if __name__ == '__main__':
+    main()
